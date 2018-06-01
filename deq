@@ -1,0 +1,381 @@
+#!/usr/bin/python
+
+import os
+import json
+import sys
+import time
+import serial
+import logging
+import pymysql.cursors
+import socket
+
+from logging.handlers import RotatingFileHandler
+from natsort import natsorted
+
+USB_DEV_ARRAY = ["/dev/ttyS0"]
+
+MY_SLEEP_INTERVAL = 3.5
+MY_ALIVE_INTERVAL = 86400 
+
+MY_MQTT_QUEUE_FILE_PATH = "/var/lora_repeater/queue/"
+MY_SENDING_FILE_PATH = "/var/lora_repeater/sending/"
+MY_SENT_FILE_PATH = "/var/lora_repeater/sent/"
+MY_SEND_FAIL_FILE_PATH = "/var/lora_repeater/fail/"
+MY_LOG_FILE_PATH = "/var/lora_repeater/log/"
+
+MY_LOG_FILENAME = MY_LOG_FILE_PATH + "deq.log"
+
+MY_NODE_MAC_ADDR = ""
+MY_NODE_MAC_ADDR_SHORT = ""
+
+GLOBAL_TIME_RUNNING = 0
+GLOBAL_COUNT_SENT = 0
+GLOBAL_COUNT_FAIL = 0
+
+SENT_OK_TAG = "Radio Tx Done\r\n"
+REPLY_OK_STRING = "OK"
+HOST, PORT = "168.168.168.20", 1234
+
+def create_socket():
+    try:
+        print "in create_socket()"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(('172.16.100.7',1234))
+
+        print "Socket create successfully"
+        #while True:
+           #print "In while"
+        sock.send("AT\r\n")
+        sock.send("QQ\r\n")
+            #time.sleep(MY_SLEEP_INTERVAL)
+        return sock
+    except:
+        my_logger.error('Socket create fail')
+        sys.exit()
+        return None
+
+def build_app_group_table():
+    # Connect to the database
+    connection = pymysql.connect(host='localhost',
+                                 user='lora',
+                                 password='lora',
+                                 db='lora',
+                                 charset='utf8mb4',
+                                 cursorclass=pymysql.cursors.DictCursor)
+
+    try:
+        with connection.cursor() as cursor:
+            # Read a single record
+            # sql = "SELECT `id`, `password` FROM `users` WHERE `email`=%s"
+            sql = "SELECT netid_group, appskey, nwkskey  FROM table_netid"
+            cursor.execute(sql)
+            for row in cursor:
+                my_dict_appskey[row["netid_group"]] = row["appskey"]
+                my_dict_nwkskey[row["netid_group"]] = row["nwkskey"]
+    finally:
+        connection.close()
+
+
+def check_lora_module(dev_path):
+    try:
+        ser = serial.Serial(dev_path, 9600, timeout=0.5)
+        ser.flushInput()
+        ser.flushOutput()
+        print "finish console init"
+        #check_my_dongle = ser.readlines()
+        #while True:
+        ser.write("AT\r\n")
+        print "in check module"
+        #time.sleep(3)
+        check_my_dongle = ser.readlines()
+        ser.write("I love you \r\n")
+        print "Hello"
+        #if any(REPLY_OK_STRING in s for s in check_my_dongle):
+        my_logger.info('My USB dongle checked')
+        return ser
+        #else:
+            #return None
+    except serial.serialutil.SerialException:
+        # print 'FAIL: Cannot open Serial Port (No LoRa Node Inserted)'
+        return None
+
+
+# start:
+# make queue file folder
+if not os.path.exists(MY_MQTT_QUEUE_FILE_PATH):
+    os.makedirs(MY_MQTT_QUEUE_FILE_PATH)
+# make sending file folder
+if not os.path.exists(MY_SENDING_FILE_PATH):
+    os.makedirs(MY_SENDING_FILE_PATH)
+# make sent file folder
+if not os.path.exists(MY_SENT_FILE_PATH):
+    os.makedirs(MY_SENT_FILE_PATH)
+# make sending fail file folder
+if not os.path.exists(MY_SEND_FAIL_FILE_PATH):
+    os.makedirs(MY_SEND_FAIL_FILE_PATH)
+# make log file folder
+if not os.path.exists(MY_LOG_FILE_PATH):
+    os.makedirs(MY_LOG_FILE_PATH)
+
+print "Helloworld"
+# Set up a specific logger with our desired output level
+my_logger = logging.getLogger('dequeue')
+# Add the log message handler to the logger
+my_logger.setLevel(logging.DEBUG)
+handler = RotatingFileHandler(MY_LOG_FILENAME, maxBytes=10240, backupCount=100)
+# create a logging format
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+my_logger.addHandler(handler)
+my_logger.info('I am started!')
+# create a socket
+#print "before create socket"       #Owen
+#sock = create_socket()             #Owen
+#while True:                                #Owen add
+#    sock.send("AT")                     #Owen add
+#    time.sleep(MY_SLEEP_INTERVAL)       #Owen add
+
+#print "after create socket"        #Owen        
+my_dict_appskey = {}
+my_dict_nwkskey = {}
+
+build_app_group_table()
+
+my_logger.info('dic - appskey and nwkskey')
+my_logger.info(my_dict_appskey)
+my_logger.info(my_dict_nwkskey)
+
+# example
+# my_logger.debug('debug message')
+# my_logger.info('info message')
+# my_logger.warn('warn message')
+# my_logger.error('error message')
+# my_logger.critical('critical message')
+
+##########Owen marked##########
+global_check_dongle_exist = False
+for devPath in USB_DEV_ARRAY:
+    print devPath
+    ser = check_lora_module(devPath)
+    if ser is None:
+        continue
+    else:
+        global_check_dongle_exist = True
+        my_logger.info('Open LoRa node done:')
+        
+        my_logger.info(devPath)
+        break
+
+if global_check_dongle_exist is False:
+    my_logger.error('no device be detected, exit!!!')
+    sys.exit()
+##############################
+
+# queue my Lora node mac address AT+SGMD?, return +SGMD:"040004C5","GLN0161400362"
+ser.flushInput()    #Owen marked
+ser.flushOutput()   #Owen marked
+# time.sleep(MY_SLEEP_INTERVAL)
+# #ser.write("AT+SGMD?\n")
+# ser.write("AT+CDEVADDR?\n")
+# my_logger.info('Write AT+CDEVADDR?')
+# return_state = ser.readlines() #Owen marked
+# time.sleep(MY_SLEEP_INTERVAL)
+# my_logger.info(return_state)
+# print return_state
+
+# if not return_state:
+# 	my_logger.error('return of AT+CDEVADDR? is empty!, restart!')
+# 	ser.close
+# 	time.sleep(MY_SLEEP_INTERVAL)
+# 	os.execv(__file__, sys.argv)
+# else:
+# 	my_logger.info(return_state)
+# 
+# matching = [s for s in return_state if "+CDEVADDR:" in s]
+# print matching  #['+SGMD:"05000095","GLN0154700000"\r\n']
+# MY_NODE_MAC_ADDR_SHORT = matching[0][10:18]
+# starPosition = matching[0].index("+CDEVADDR:")
+# #print starPosition
+# starPosition = starPosition+len("+CDEVADDR:")
+# endPosition = starPosition+8
+# MY_NODE_MAC_ADDR_SHORT = matching[0][starPosition:endPosition]
+# #print MY_NODE_MAC_ADDR_SHORT
+# MY_NODE_MAC_ADDR = "00000000"+ MY_NODE_MAC_ADDR_SHORT
+# #print ("Check: My LoRa Node MAC Addr:" + MY_NODE_MAC_ADDR)
+# my_logger.info('Check: My LoRa Node MAC Addr:')
+# my_logger.info(MY_NODE_MAC_ADDR)
+my_dict = {}
+print "Before while 1"  #Owen
+
+while 1:
+    for sending_f in natsorted(os.listdir(MY_MQTT_QUEUE_FILE_PATH)):   #Owen modifysending_f in os.listdir(MY_MQTT_QUEUE_FILE_PATH):
+        print "a packet received"  #Owen
+        # print sending_f
+        my_logger.info(sending_f)
+        # read mqtt payload its mine
+        # if MY_NODE_MAC_ADDR in sending_f:
+        # 			#print("#############Sending by Myself#########")
+        # 			my_logger.info('#############Sending by Myself#########')
+        # 			os.remove(MY_MQTT_QUEUE_FILE_PATH+sending_f)
+        # 			continue
+        # 		else:
+        # 			#print("Prepare to send data")
+        # 			my_logger.info('Prepare to send data')
+        #
+        # protection
+        os.rename(MY_MQTT_QUEUE_FILE_PATH + sending_f, MY_SENDING_FILE_PATH + sending_f)
+        my_logger.info('Rename File Done')
+        f = open(MY_SENDING_FILE_PATH + sending_f, 'r')
+        my_logger.info('Open File Done')
+        f_json_data = f.read()
+        my_logger.info('Read File Done')
+        f.close()
+        my_logger.info('Close File Done')
+        print(len(f_json_data));
+        if len(f_json_data) == 0:
+            continue 
+        sensor_data = str(json.loads(f_json_data)[0]['data'])
+        sensor_macAddr = str(json.loads(f_json_data)[0]['macAddr'])
+        sensor_frameCnt = str(json.loads(f_json_data)[0]['frameCnt'])
+        nFrameCnt = json.loads(f_json_data)[0]['frameCnt']
+        # print my_dict
+        bSending = True;
+        if sensor_macAddr in my_dict:
+            nPrevFrameCnt = my_dict.get(sensor_macAddr)
+            if nFrameCnt == 1:
+                my_dict[sensor_macAddr] = nFrameCnt
+                if nPrevFrameCnt - nFrameCnt > 10000:   #Owen
+	            bSending = True
+		    my_dict[sensor_macAddr] = nFrameCnt
+	
+                bSending = False;
+            	#elif nPrevFrameCnt == 1:
+		#    bSending = False
+                #    my_logger.info('sending fail 1');
+                #else:
+                #    my_logger.info("in frame count 1")
+                #    bSending = False
+                #    my_logger.info('sending fail 2');
+            elif nFrameCnt == nPrevFrameCnt:
+                bSending = False
+                my_logger.info('sending fail 3');
+            elif nPrevFrameCnt - nFrameCnt > 10:
+                my_dict[sensor_macAddr] = nFrameCnt
+                bSending = False
+                my_logger.info('sending fail 4');
+            elif nFrameCnt > nPrevFrameCnt:
+                my_dict[sensor_macAddr] = nFrameCnt
+            else:
+                bSending = False
+                my_logger.info('sending fail 5');   
+                # print 'exist=' + sensor_macAddr
+        else:
+            my_dict[sensor_macAddr] = nFrameCnt
+            # print 'add=' + sensor_macAddr
+            if nFrameCnt == 1:
+                bSending = True
+        # print my_dict
+        my_logger.info('macAddr')
+        my_logger.info(sensor_macAddr[8:16])
+	my_logger.info(bSending)
+        sensor_nwkskey = ""
+        sensor_appskey = ""
+        # print(sensor_macAddr[8:10])
+        # if "04" in sensor_macAddr[8:10]:
+        #     sensor_nwkskey = "43610A1F04719BB807A8073F8AECB131"
+        #     sensor_appskey = sensor_nwkskey
+        #
+        # if "05" in sensor_macAddr[8:10]:
+        #     sensor_nwkskey = "63D83C7F054A18D423BDFB712D8F4371"
+        #     sensor_appskey = sensor_nwkskey
+        #
+        # if "0d" in sensor_macAddr[8:10]:
+        #     sensor_nwkskey = "933C5ACB0D941ED1EC32DA7D9174C452"
+        #     sensor_appskey = sensor_nwkskey
+
+        if sensor_macAddr[8:10] in my_dict_appskey:
+            sensor_nwkskey = my_dict_nwkskey[sensor_macAddr[8:10]]
+            sensor_appskey = my_dict_appskey[sensor_macAddr[8:10]]
+        else:
+            my_logger.info('Not in ABP Group Config Rule, so give up')
+            bSending = False
+	my_logger.info("2")
+	my_logger.info(bSending)
+        #if nFrameCnt == 1:                     #Owen add
+        #    print "nFramecount = 1 bsending turn to false" #Owen added
+        #    bSending = False                       #Owen add
+        # print bSending
+        if bSending is False:
+            print "bsending is false"
+            my_logger.info('this package Can NOT be sent!')
+            os.remove(MY_SENDING_FILE_PATH + sending_f)
+            continue
+        else:
+            my_logger.info('this package Will be sent!')
+
+        my_logger.info('frameCnt')
+        my_logger.info(sensor_frameCnt)
+        my_logger.info('DATA')
+        my_logger.info(sensor_data)
+        #Adding by Chris
+        sensor_data = sensor_data + "ff"
+        sensor_data_len = len(sensor_data)
+        my_logger.info('DATA Len')
+        my_logger.info(sensor_data_len)
+
+        # print("sensor_data:" + sensor_data )
+        # data_sending = "AT+DTX="+str(sensor_data_len)+","+sensor_data+"\n"
+        data_sending = "AT+SSTX=" + str(sensor_data_len) + "," + sensor_data + "," + sensor_macAddr[
+                                                                                     8:16] + "," + sensor_frameCnt + "," + sensor_nwkskey + "," + sensor_appskey + "\n"
+        data_sending = str(data_sending)
+        my_logger.info(data_sending)
+        print data_sending
+        #time.sleep(MY_SLEEP_INTERVAL)
+        GLOBAL_TIME_RUNNING += MY_SLEEP_INTERVAL
+        # print('GLOBAL_TIME_RUNNING')
+        # print(GLOBAL_TIME_RUNNING)
+        my_logger.info('Sending')
+        ser.flushInput()   #Owen marked
+        ser.flushOutput()  #Owen marked
+        ser.write(data_sending)  #Owen marked
+        #sock.send(data_sending)  #Owen added
+        my_logger.info(data_sending)
+        return_state = ser.read(20)
+        print(return_state)
+        my_logger.info(return_state)
+        if SENT_OK_TAG in return_state:
+            time.sleep(MY_SLEEP_INTERVAL)   
+            print("Result: SENT.")
+            my_logger.info('Result: SENT.')
+            GLOBAL_COUNT_SENT += 1
+            os.rename(MY_SENDING_FILE_PATH + sending_f, MY_SENT_FILE_PATH + sending_f)
+        else:
+            time.sleep(MY_SLEEP_INTERVAL) 
+            # print("Result: FAIL! move to FAIL")
+            my_logger.error('Result: FAIL! move to FAIL.')
+            GLOBAL_COUNT_FAIL += 1
+            os.rename(MY_SENDING_FILE_PATH + sending_f, MY_SEND_FAIL_FILE_PATH + sending_f)
+    else:
+        print("Waiting for incoming queue")
+        time.sleep(MY_SLEEP_INTERVAL)
+        GLOBAL_TIME_RUNNING += MY_SLEEP_INTERVAL
+
+        # print("in while loop")
+        if GLOBAL_TIME_RUNNING >= MY_ALIVE_INTERVAL:
+            # send alive command
+            # time.sleep(MY_SLEEP_INTERVAL)
+            # data_alive = MY_NODE_MAC_ADDR_SHORT + "E" +str(GLOBAL_COUNT_SENT) + "F" +str(GLOBAL_COUNT_FAIL)
+            # 		data_alive_send = "AT+DTX=" + str (len(data_alive)) + "," + data_alive + "\n"
+            # ser.flushInput()  Owen marked
+            # ser.flushOutput() Owen marked   
+            my_logger.info("alive")
+            #sock.send("AT+DTTX\n")
+            ser.write("AT+DTTX\n") #Owen marked
+            return_state = ser.recv(20)
+            # 		my_logger.info('Alive message')
+            my_logger.info(return_state)
+            # 		#print(return_state)
+            # 		GLOBAL_COUNT_SENT=0
+            # 		GLOBAL_COUNT_FAIL=0
+            GLOBAL_TIME_RUNNING = 0
+#ser.close Owen added
